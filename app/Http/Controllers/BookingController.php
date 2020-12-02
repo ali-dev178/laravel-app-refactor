@@ -7,6 +7,9 @@ use DTApi\Http\Requests;
 use DTApi\Models\Distance;
 use Illuminate\Http\Request;
 use DTApi\Repository\BookingRepository;
+use Illuminate\Database\Eloquent\ModelNotFoundException;
+use App\Http\Requests\DistanceFeedRequest;
+use Response;
 
 /**
  * Class BookingController
@@ -36,9 +39,7 @@ class BookingController extends Controller
     public function index(Request $request)
     {
         if($user_id = $request->get('user_id')) {
-
             $response = $this->repository->getUsersJobs($user_id);
-
         }
         elseif($request->__authenticatedUser->user_type == env('ADMIN_ROLE_ID') || $request->__authenticatedUser->user_type == env('SUPERADMIN_ROLE_ID'))
         {
@@ -52,10 +53,8 @@ class BookingController extends Controller
      * @param $id
      * @return mixed
      */
-    public function show($id)
-    {
-        $job = $this->repository->with('translatorJobRel.user')->find($id);
-
+    public function show(BookingRepository $bookingRepository)
+    {   $job = $bookingRepository->with('translatorJobRel.user')->get();
         return response($job);
     }
 
@@ -192,83 +191,62 @@ class BookingController extends Controller
         return response($response);
     }
 
-    public function distanceFeed(Request $request)
+    public function distanceFeed(DistanceFeedRequest $request) // validation requests implented and used here
     {
+        $message = ''; $result_type = 1; $status_code = 200; $data = [];
+
         $data = $request->all();
 
-        if (isset($data['distance']) && $data['distance'] != "") {
-            $distance = $data['distance'];
-        } else {
-            $distance = "";
-        }
-        if (isset($data['time']) && $data['time'] != "") {
-            $time = $data['time'];
-        } else {
-            $time = "";
-        }
-        if (isset($data['jobid']) && $data['jobid'] != "") {
-            $jobid = $data['jobid'];
+        /* Here if we have consistent request input formatting than we can create trait and reuse code in single inheritance.
+
+        We created a method in traits and used in the base controller to access any of the other controller.
+        So in thi smethod we pass $data as first parameter and array of attributes/features names that are need to be format as a second parameter
+
+        We can use this method in several ways in several ways
+            1. $this->formatInput($data, array('strAttrs' => ['jobid', 'session_time'])); // this will check the isset and empty condition
+            2. $this->formatInput($data, array('boolAttrs' => ['flagged'])); // this is for formating and getting the result in yes/no form.
+            3. $this->formatInput($data, array('jobid', 'session_time')); // in this case attributes will consider as strAttr as we discussed before */
+
+        $data = $this->formatInput($data, array('strAttrs' => ['distance', 'time', 'jobid', 'session_time', 'admincomment'], 'boolAttrs' => ['flagged', 'manually_handled', 'by_admin']));
+        $data['admin_comments'] = $data['admincomment'];
+
+        /* if we already added these attributes in formatInput helper method than here we dont need to recheck again
+            if ($admincomment || $session_time || $flagged || $manually_handled || $by_admin) */
+
+        /* there was no exception hangling here i mean what if the job record not found with the $id. it mean record will not be updated but in responce we return the response with success message which is wrong */
+
+        try {
+            /* we can use both ways to update record with new data. In the older way we can use if we have some limited number of attributes need to be updated. But if we have not restriction wants to updated the the formatted data we can used it like this. */
+            Job::findOrFail($id)->update($data);
+        } catch (ModelNotFoundException $e) {
+            // exception handling code will be here
         }
 
-        if (isset($data['session_time']) && $data['session_time'] != "") {
-            $session = $data['session_time'];
-        } else {
-            $session = "";
-        }
+        $message = 'Record updated!';
 
-        if ($data['flagged'] == 'true') {
-            if($data['admincomment'] == '') return "Please, add comment";
-            $flagged = 'yes';
-        } else {
-            $flagged = 'no';
-        }
-        
-        if ($data['manually_handled'] == 'true') {
-            $manually_handled = 'yes';
-        } else {
-            $manually_handled = 'no';
-        }
-
-        if ($data['by_admin'] == 'true') {
-            $by_admin = 'yes';
-        } else {
-            $by_admin = 'no';
-        }
-
-        if (isset($data['admincomment']) && $data['admincomment'] != "") {
-            $admincomment = $data['admincomment'];
-        } else {
-            $admincomment = "";
-        }
-        if ($time || $distance) {
-
-            $affectedRows = Distance::where('job_id', '=', $jobid)->update(array('distance' => $distance, 'time' => $time));
-        }
-
-        if ($admincomment || $session || $flagged || $manually_handled || $by_admin) {
-
-            $affectedRows1 = Job::where('id', '=', $jobid)->update(array('admin_comments' => $admincomment, 'flagged' => $flagged, 'session_time' => $session, 'manually_handled' => $manually_handled, 'by_admin' => $by_admin));
-
-        }
-
-        return response('Record updated!');
+        /* the api design should be consistant and standardised with responce containing all kind of basic information. So for this i have created a custom Api responce formatting method in the bas controller */
+        $response = $this->makeResponse($data, $message, $result_type, $status_code);
+        return Response::json($response)->header('Content-Length', strlen(json_encode($response)));
     }
 
     public function reopen(Request $request)
     {
-        $data = $request->all();
-        $response = $this->repository->reopen($data);
-
+        $response = $this->repository->reopen($request->all());
         return response($response);
     }
 
     public function resendNotifications(Request $request)
     {
-        $data = $request->all();
-        $job = $this->repository->find($data['jobid']);
-        $job_data = $this->repository->jobToData($job);
-        $this->repository->sendNotificationTranslator($job, $job_data, '*');
-
+        $data = $request->only('jobid');
+        
+        try {
+            $job = $this->repository->find($data['jobid']);
+            $job_data = $this->repository->jobToData($job);
+            $this->repository->sendNotificationTranslator($job, $job_data, '*');
+        } catch (Exception $e) {
+            // exception handling code will be here
+        }
+        
         return response(['success' => 'Push sent']);
     }
 
@@ -279,7 +257,7 @@ class BookingController extends Controller
      */
     public function resendSMSNotifications(Request $request)
     {
-        $data = $request->all();
+        $data = $request->only('jobid');
         $job = $this->repository->find($data['jobid']);
         $job_data = $this->repository->jobToData($job);
 
